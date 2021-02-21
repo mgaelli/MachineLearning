@@ -1,0 +1,195 @@
+---
+title: "Machine Learning Assignment"
+author: "Markus Gälli"
+date: "2/18/2021"
+output: html_document
+editor_options: 
+  chunk_output_type: console
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(dplyr)
+library(ggplot2)
+library(caret)
+library(e1071)
+library(tidyr)
+options(digits = 2)
+```
+
+## Overview
+
+This document covers the analysis of excerise data collected from accelerometers from http://web.archive.org/web/20161224072740/http:/groupware.les.inf.puc-rio.br/har
+
+Different models were evaluated to maximize the prediction accuracy of the how the person exercised (correct, or one of 5 incorrect ways).
+
+## Data
+ 
+Data was downloaded from the assigned repository:
+The training data for this project are available here:
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv
+
+
+
+```{r LoadData}
+setwd("~/R/Projects/Coursera Class/MachineLearningAssignment")
+training <- read.csv("./data/pml-training.csv")
+testing <- read.csv("./data/pml-testing.csv")
+```
+
+# Data Preparation
+To facilitate the subsequent analysis, the training data has to be transformed somewhat:
+
+- Turn the "classe" variable (indicating the exercise type) into a factor variable
+- Put all the data into a data frame
+- Make sure the data is imported as numeric (and not as character)
+- Remove any variables with "NA" in them, as they can't be used for prediction
+- Remove the first 7 columns as they do not contain data useful for this analysis
+
+```{r DataPreproccessing}
+training$classe <- factor(training$classe)
+oldw <- getOption("warn")
+options(warn = -1)
+trainData <- as.data.frame(apply(training[,1:159],2,as.numeric))
+options(warn = oldw)
+trainData <- trainData %>% mutate(classe=training$classe)
+cntNA <- apply(is.na(trainData), 2, sum)
+ignore=which(cntNA != 0)
+trainData <- trainData %>% select(-all_of(ignore)) %>% select(-(1:7))
+```
+
+The remaining data has the following dimension: `r nrow(trainData)` rows and `r ncol(trainData)` columns.
+
+Next, we want to check for highly correlated variables. The diagonal has to be removed, and then a list is created with pairs of measurement variables that have a correlation of > 0.8. As the whole correlation matrix is included, each pair shows up twice.
+
+```{r Correlations}
+res <- cor(trainData[,-50])
+high_corr <- which(abs(res)>0.8)
+nc <- ncol(trainData)
+dn <- seq(1,nc-1,by=1)
+diagonal <- function(x){
+    (x-1)*(length(x)+1)+1
+}
+diag <- diagonal(dn)
+diag_ord <- high_corr %in% diag
+remove <- high_corr[!diag_ord]
+remove_row <- as.integer((remove-1)/49)+1
+remove_col <- (remove-1) %% 49 +1
+
+removeNames <- data.frame(rowN = names(trainData)[remove_row])
+removeNames <- cbind(removeNames,colN = names(trainData)[remove_col])
+removeNames
+```
+
+The highly correlated variables are removed from the data frame (not all of the above variables, but one from each pair).
+
+```{r dataframeCleanup}
+excludeNames <- c("gyros_forearm_z","accel_belt_y","accel_belt_z","gyros_dumbbell_x","gyros_arm_y","magnet_arm_x","magnet_arm_z",
+                  "magnet_belt_x","pitch_dumbbell","yaw_dumbbell")
+
+smallData <- trainData %>% select(-all_of(excludeNames))
+
+```
+
+This data set is now the one to work on.
+
+## Modeling
+
+First we break the data set into a training set and a testing set.
+
+```{r trainAndTest}
+set.seed(666)
+inTrain <- createDataPartition(y=smallData$classe,p=0.7,list=FALSE)
+trainingData <- smallData[inTrain,]
+testingData <- smallData[-inTrain,]
+
+```
+
+The training set contains `r nrow(trainingData)` rows, and the testing set contains `r nrow(testingData)` rows. Both contain `r ncol(trainingData)` columns.
+
+The following methods will be evaluated:
+
+- Regression Trees
+- Random Forests
+- Boosting With Trees
+- Support Vector Machines
+- Linear Discriminant Analysis
+
+For each method, a model is created using the training set, which is then used to predict on the training set. The results are evaluated using a confusion matrix.
+
+```{r regressionTrees}
+modFitTree <- train(classe~.,data=trainingData,method="rpart")
+predTree <- predict(modFitTree,trainingData)
+accTree<- confusionMatrix(predTree,trainingData$classe)
+
+```
+
+```{r regressionRF}
+modFitRF <- train(classe ~ ., data=trainingData, method="rf",trControl = trainControl(method="cv"),number=3)
+predRF <- predict(modFitRF,trainingData)
+accRF <- confusionMatrix(predRF,trainingData$classe)
+```
+
+```{r regression Boosting}
+modFitGBM <- train(classe ~ ., data=trainingData,method="gbm",verbose=FALSE)
+predGBM <- predict(modFitGBM,trainingData)
+accGBM <- confusionMatrix(predGBM, trainingData$classe)
+```
+
+```{r regression SVM}
+modFitSVM <- svm(classe ~ ., data=trainingData)
+predSVM <- predict(modFitSVM,trainingData)
+accSVM <- confusionMatrix(predSVM,trainingData$classe)
+```
+
+```{R regressionLDA}
+modFitLDA <- train(classe ~ ., data=trainingData, method= "lda")
+predLDA <- predict(modFitLDA,trainingData)
+accLDA <- confusionMatrix(predLDA,trainingData$classe)
+```
+
+
+The following graph shows the model accuracy for all four tested method.
+```{r graph TrainingResults}
+resModel <- c("Tree","RandomForest","GBM","LDA","SVM") 
+resAcc <- c(accTree$overall[1],accRF$overall[1],accGBM$overall[1],accLDA$overall[1],accSVM$overall[1])
+res <- data.frame(model=resModel,train_accuracy = resAcc)
+
+g <- res %>% ggplot(aes(model,train_accuracy)) + geom_col() + 
+    labs(title="Prediction Accuracies",x="Method",y="Accuracy") 
+g
+```
+
+Random Forest, Support Vector Machines and Boosting WIth Trees clearly give the best answers, with high accuracy.
+Now we validate the models by applying them to the testing data, which also provides the out of sample accuracy.
+
+```{r CrossValidation}
+resTree <- confusionMatrix(predict(modFitTree,testingData),testingData$classe)
+resRF <- confusionMatrix(predict(modFitRF,testingData),testingData$classe)
+resGBM <- confusionMatrix(predict(modFitGBM,testingData),testingData$classe)
+resLDA <- confusionMatrix(predict(modFitLDA,testingData),testingData$classe)
+resSVM <- confusionMatrix(predict(modFitSVM,testingData),testingData$classe)
+resTest <- c(resTree$overall[1],resRF$overall[1],resGBM$overall[1],resLDA$overall[1],resSVM$overall[1])
+
+res <- cbind(res,test_accuracy=resTest)
+reslong <- res %>% gather("series","acc",-model)
+
+g <- reslong %>% ggplot(aes(model,acc,fill=series)) + geom_col(position="dodge") + 
+    labs(title="Prediction Accuracies",x="Model",y="Accuracy") + 
+    scale_fill_discrete(name="Data Series",labels = c("Testing","Training"))
+g
+```
+
+The graph shows both the in-sample and out-of-sample accuracies.
+
+
+
+For the top 3 methods, the table below shows the accuracies:
+
+Method        | In Model Accuracy | Out Of Model Accuracy
+--------------|-------------------|----------------------
+Random Forest | `r accRF$overall[1]` | `r resRF$overall[1]`
+SVM           | `r accSVM$overall[1]`| `r resSVM$overall[1]`
+Boosting with Trees | `r accGBM$overall[1]` | `r resGBM$overall[1]`
+
+Based on these results, Random Forest seems to be the best method for the analysis of the provided data.
